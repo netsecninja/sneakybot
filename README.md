@@ -12,9 +12,12 @@ SneakyBot is a lightweight, asynchronous administration and monitoring tool desi
 - **Security**: Supports environment variables for sensitive RCON and Discord credentials.
 
 ## 🛠 Installation
+Installation occurs on the Urban Terror server.
+
 ### Prerequisites
 - Python 3.8 or higher.
 - A running Urban Terror 4.3+ Server.
+- Access to the command line of the UT server.
 - Read access to the server's `games.log` file.
 
 ### Setup using Virtual Environment (venv)
