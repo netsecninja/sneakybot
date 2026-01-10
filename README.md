@@ -23,7 +23,7 @@ Installation occurs on the Urban Terror server.
 ### Setup using Virtual Environment (venv)
 1. **Clone the repository**:
     ```
-    git clone [https://github.com/your-username/sneakybot.git](https://github.com/your-username/sneakybot.git)
+    git clone https://github.com/netsecninja/sneakybot.git
     cd sneakybot
     ```
 2. **Create and activate a virtual environment**:
