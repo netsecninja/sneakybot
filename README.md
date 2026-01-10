@@ -63,4 +63,4 @@ python main.py
 This project is licensed under the GNU GPLv3 License - see the [LICENSE](https://www.gnu.org/licenses/gpl-3.0.html "null") file for details.
 
 ## 🙌 Credits
-Created by **Jeremiah Bess ([SBs]PenguinGeek)**.
+Created by **Jeremiah Bess ([SBs]PenguinGeek)** with significant help from Google's Gemini Canvas.
