@@ -18,7 +18,7 @@ import signal
 from typing import Dict, List, Tuple, Set
 
 # --- METADATA ---
-__version__ = "3.0.0"
+__version__ = "3.1.0"
 __author__ = "Jeremiah Bess - [SBs]PenguinGeek"
 
 # --- CONFIGURATION MANAGEMENT ---
@@ -39,10 +39,20 @@ file_handler = logging.FileHandler(LOG_FILE)
 file_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
 
+# Map Quake gametype IDs to human readable names
+GAMETYPES = {
+    "0": "Free For All",
+    "3": "Team Death Match",
+    "4": "Team Survivor",
+    "5": "Follow the Leader",
+    "6": "Capture and Hold",
+    "7": "Capture the Flag",
+    "8": "Bomb Mode"
+}
+
 def load_config():
     """
     Generates a default config.ini and loads settings.
-    Uses environment variables as overrides for security.
     """
     config = configparser.ConfigParser(allow_no_value=True)
 
@@ -50,14 +60,15 @@ def load_config():
         config['PATHS'] = {
             '; Path to the Urban Terror games.log file': None,
             'log_path': '/opt/urbanterror43/q3ut4/games.log',
-            '; Path to the server.cfg for auto-validation': None,
-            'server_cfg': '/opt/urbanterror43/q3ut4/server.cfg'
+            '; Path to the server.cfg for auto-validation and RCON password': None,
+            'server_cfg': '/opt/urbanterror43/q3ut4/server.cfg',
+            '; Path to the mapcycle.txt file': None,
+            'mapcycle_path': '/opt/urbanterror43/q3ut4/mapcycle.txt'
         }
         config['SERVER'] = {
             '; Quake3 server connection details': None,
             'host': '127.0.0.1',
-            'port': '27960',
-            'rcon_password': 'your_password_here'
+            'port': '27960'
         }
         config['RULES'] = {
             '; Rules shown when a player types !rules. Separate with | for multi-line display.': None,
@@ -77,7 +88,10 @@ def load_config():
                 "This is a family-oriented server, watch your language and behavior|"
                 "Server rules listed at sneakybs.com|"
                 "Join our Discord voice - link at sneakybs.com"
-            )
+            ),
+            '; Periodic broadcast of the next map in rotation': None,
+            'nextmap_enabled': 'true',
+            'nextmap_interval': '300'
         }
         config['DISCORD_NOTIFICATIONS'] = {
             '; Templates for Discord posts. {count} and {max} are variables.': None,
@@ -95,20 +109,14 @@ def load_config():
 
         logger.info("=" * 50)
         logger.info(f"CREATED DEFAULT CONFIGURATION: {CONFIG_FILE}")
-        logger.info("Please edit config.ini or set environment variables before running.")
+        logger.info("Please edit config.ini before running.")
         logger.info("=" * 50)
         sys.exit(0)
 
     config.read(CONFIG_FILE)
 
-    # Ensure RULES section exists
     if 'RULES' not in config:
         config['RULES'] = {'rule_list': '1. No Cheating | 2. Respect Others | 3. Have Fun'}
-
-    # Environment variable overrides
-    env_rcon = os.getenv('URT_RCON_PASSWORD')
-    if env_rcon:
-        config['SERVER']['rcon_password'] = env_rcon
 
     env_webhook = os.getenv('URT_DISCORD_WEBHOOK')
     if env_webhook:
@@ -158,6 +166,10 @@ class RCONClient:
         self.prefix = b'\xff\xff\xff\xff'
 
     async def send_command(self, cmd: str) -> str:
+        if not self.password:
+            logger.error("[RCON] No password available. Command aborted.")
+            return "No Password"
+
         logger.info(f"[RCON] Sending command: {cmd}")
         loop = asyncio.get_running_loop()
         full_cmd = f'rcon "{self.password}" {cmd}\n'
@@ -174,6 +186,7 @@ class RCONClient:
         return "Command Sent"
 
     async def get_status(self) -> Tuple[Dict[str, str], List[str]]:
+        if not self.password: return {}, []
         loop = asyncio.get_running_loop()
         message = self.prefix + b'getstatus\n'
         done = loop.create_future()
@@ -203,23 +216,103 @@ class SneakyBot:
     def __init__(self, config):
         self.config = config
         self.version = __version__
+        self.log_path = config.get('PATHS', 'log_path', fallback='')
+        self.server_cfg = config.get('PATHS', 'server_cfg', fallback='')
+        self.mapcycle_path = config.get('PATHS', 'mapcycle_path', fallback='')
+
         self.rcon = RCONClient(
             host=config.get('SERVER', 'host', fallback='127.0.0.1'),
             port=config.getint('SERVER', 'port', fallback=27960),
-            password=config.get('SERVER', 'rcon_password', fallback='')
+            password=""
         )
-        self.log_path = config.get('PATHS', 'log_path', fallback='')
+
         self.running = True
         self.players: Dict[str, str] = {}
         self.welcomed_players: Set[str] = set()
         self.last_player_count = 0
 
+    def _get_rcon_from_cfg(self):
+        if not self.server_cfg or not os.path.exists(self.server_cfg):
+            return None
+        try:
+            with open(self.server_cfg, 'r') as f:
+                content = f.read()
+                match = re.search(rf'set[a]?\s+rconpassword\s+["\']?([^"\']+)["\']?', content, re.IGNORECASE)
+                if match:
+                    return match.group(1)
+        except Exception as e:
+            logger.error(f"Error reading RCON password from server.cfg: {e}")
+        return None
+
+    async def broadcast(self, message: str):
+        await self.rcon.send_command(f'say {message}')
+
+    async def get_next_map_info(self) -> str:
+        """Parses mapcycle.txt to find the next map info based on current map."""
+        if not self.mapcycle_path or not os.path.exists(self.mapcycle_path):
+            return "Mapcycle file not found."
+
+        cvars, _ = await self.rcon.get_status()
+        current_map = cvars.get('mapname', '').lower()
+
+        try:
+            with open(self.mapcycle_path, 'r') as f:
+                lines = [line.strip() for line in f.readlines() if line.strip()]
+
+            next_line = None
+            for i, line in enumerate(lines):
+                if line.lower().startswith(current_map):
+                    next_line = lines[(i + 1) % len(lines)]
+                    break
+
+            if not next_line and lines:
+                next_line = lines[0]
+
+            if next_line:
+                map_match = re.match(r'^([^\s{]+)', next_line)
+                if not map_match: return "Could not parse next map name."
+
+                target_map = map_match.group(1)
+
+                gt = re.search(r'g_gametype\s+(\d+)', next_line)
+                insta = re.search(r'g_instagib\s+(\d+)', next_line)
+                grav = re.search(r'g_gravity\s+(\d+)', next_line)
+
+                gametype_str = GAMETYPES.get(gt.group(1) if gt else "0", "Unknown Mode")
+                is_instagib = (insta.group(1) == "1") if insta else False
+                is_lowgrav = (int(grav.group(1)) < 800) if grav else False
+
+                prefix = []
+                if is_lowgrav: prefix.append("Low gravity")
+                if is_instagib: prefix.append("Instagib")
+
+                prefix_str = " ".join(prefix)
+                if prefix_str:
+                    return f"Next map: {prefix_str} {gametype_str} on {target_map}"
+                else:
+                    return f"Next map: {gametype_str} on {target_map}"
+
+        except Exception as e:
+            logger.error(f"Error parsing mapcycle: {e}")
+            return "Error reading map rotation."
+
+        return "Map cycle empty or current map not found."
+
     async def check_server_config(self):
         required_vars = {"g_logsync": "1", "g_loghits": "1"}
-        cfg_path = self.config.get('PATHS', 'server_cfg', fallback='')
-        if not cfg_path or not os.path.exists(cfg_path): return
+        if not self.server_cfg or not os.path.exists(self.server_cfg):
+            logger.warning(f"server.cfg not found at {self.server_cfg}. RCON commands will be disabled.")
+            return
+
+        extracted_pw = self._get_rcon_from_cfg()
+        if extracted_pw:
+            self.rcon.password = extracted_pw
+            logger.info("Successfully extracted RCON password from server.cfg")
+        else:
+            logger.error("RCON password NOT found in server.cfg. RCON functionality is disabled.")
+
         try:
-            with open(cfg_path, 'r') as f: lines = f.readlines()
+            with open(self.server_cfg, 'r') as f: lines = f.readlines()
             modified = False
             for var, val in required_vars.items():
                 found = False
@@ -236,7 +329,7 @@ class SneakyBot:
                     lines.append(f"set {var} \"{val}\" // Added by SneakyBot\n")
                     modified = True
             if modified:
-                with open(cfg_path, 'w') as f: f.writelines(lines)
+                with open(self.server_cfg, 'w') as f: f.writelines(lines)
                 logger.critical("!!! server.cfg updated. PLEASE RESTART THE SERVER !!!")
                 sys.exit(1)
         except SystemExit: raise
@@ -271,13 +364,10 @@ class SneakyBot:
             match = RE_CHAT.search(line)
             if match:
                 await self.on_chat(match.group(1), match.group(2))
-            else:
-                logger.debug(f"Unmatched chat line: {line}")
 
         elif 'ClientUserinfoChanged:' in line:
             match = RE_USERINFO.search(line)
-            if match:
-                self.players[match.group(1)] = match.group(2)
+            if match: self.players[match.group(1)] = match.group(2)
 
         elif 'ClientBegin:' in line:
             match = RE_BEGIN.search(line)
@@ -287,8 +377,6 @@ class SneakyBot:
             match = RE_DISCONNECT.search(line)
             if match:
                 cid = match.group(1)
-                player_name = self.players.get(cid, f"Client {cid}")
-                logger.info(f"[DISCONNECT] {player_name} left the server.")
                 if cid in self.players: del self.players[cid]
                 if cid in self.welcomed_players: self.welcomed_players.remove(cid)
 
@@ -300,24 +388,35 @@ class SneakyBot:
             rule_config = self.config.get('RULES', 'rule_list', fallback='1. No Cheating | 2. Respect Others')
             rules = [r.strip() for r in rule_config.split('|')]
             for rule in rules:
-                await self.rcon.send_command(f'say ^2RULES ^7{rule}')
+                await self.broadcast(f'^2RULES: ^7{rule}')
                 await asyncio.sleep(0.1)
 
         elif msg == '!ping':
-            await self.rcon.send_command('say ^3Pong!')
+            await self.broadcast('^3Pong!')
+
+        elif msg == '!sneakybot':
+            await self.broadcast(f'^7SneakyBot v{self.version}: ^3https://github.com/netsecninja/sneakybot')
+
+        elif msg == '!nextmap':
+            resp = await self.get_next_map_info()
+            await self.broadcast(f'^7{resp}')
+
+        elif msg in ['!forgive', '!forgiveall', '!fp', '!fa']:
+            await self.broadcast("^1Bwahahaha! ^7There's no forgiveness here!")
+
+        elif msg == '!help':
+            commands = "!help, !rules, !ping, !sneakybot, !nextmap"
+            await self.broadcast(f'^7Available commands: ^3{commands}')
 
     async def on_connect(self, client_id: str):
         player_name = self.players.get(client_id, f"Client {client_id}")
-        logger.info(f"[CONNECT] {player_name} joined.")
-
         if client_id in self.welcomed_players: return
-        await self.rcon.send_command(f'say ^7Welcome ^3{player_name}^7! - Powered by SneakyBot')
+        await self.broadcast(f'^7Welcome ^3{player_name}^7! - Powered by SneakyBot')
         self.welcomed_players.add(client_id)
 
     async def send_discord_webhook(self, message: str):
         webhook_url = self.config.get('DISCORD', 'webhook_url', fallback='')
         if not webhook_url: return
-        logger.info(f"[DISCORD] Posting notification: {message.splitlines()[0]}...")
         async with aiohttp.ClientSession() as session:
             try:
                 async with session.post(webhook_url, json={"content": message}) as resp:
@@ -328,7 +427,6 @@ class SneakyBot:
     async def discord_update_task(self):
         if not self.config.getboolean('DISCORD', 'enabled', fallback=False): return
         interval = self.config.getint('DISCORD', 'update_interval', fallback=60)
-        logger.info(f"Discord Monitoring Task started ({interval}s).")
         while self.running:
             cvars, player_list = await self.rcon.get_status()
             count = len(player_list)
@@ -336,24 +434,16 @@ class SneakyBot:
             map_name = cvars.get('mapname', 'Unknown')
             if count != self.last_player_count:
                 msg_template = None
-                if count == 0:
-                    msg_template = self.config.get('DISCORD_NOTIFICATIONS', 'empty_server')
-                elif count == 1:
-                    msg_template = self.config.get('DISCORD_NOTIFICATIONS', 'single_player')
-                elif count == max_slots:
-                    msg_template = self.config.get('DISCORD_NOTIFICATIONS', 'full_server')
-                elif count == max_slots - 1:
-                    msg_template = self.config.get('DISCORD_NOTIFICATIONS', 'almost_full')
+                if count == 0: msg_template = self.config.get('DISCORD_NOTIFICATIONS', 'empty_server')
+                elif count == 1: msg_template = self.config.get('DISCORD_NOTIFICATIONS', 'single_player')
+                elif count == max_slots: msg_template = self.config.get('DISCORD_NOTIFICATIONS', 'full_server')
+                elif count == max_slots - 1: msg_template = self.config.get('DISCORD_NOTIFICATIONS', 'almost_full')
                 elif count % 2 != 0:
                     pool = self.config.get('DISCORD_NOTIFICATIONS', 'imbalance_messages').split('|')
                     msg_template = random.choice(pool)
                 if msg_template:
                     msg = msg_template.format(count=count, max=max_slots)
-                    if count == 0:
-                        payload = msg
-                    else:
-                        players_str = "\n".join(player_list)
-                        payload = f"{msg}\n**Map:** {map_name}\n**Players:**\n{players_str}"
+                    payload = f"{msg}\n**Map:** {map_name}\n**Players:**\n" + "\n".join(player_list) if count > 0 else msg
                     await self.send_discord_webhook(payload)
             self.last_player_count = count
             await asyncio.sleep(interval)
@@ -363,46 +453,50 @@ class SneakyBot:
         interval = self.config.getint('BROADCAST', 'interval', fallback=300)
         messages = self.config.get('BROADCAST', 'messages', fallback='').split('|')
         if not messages or not messages[0]: return
-        logger.info(f"Broadcast Task started ({interval}s).")
         idx = 0
         while self.running:
             await asyncio.sleep(interval)
             _, player_list = await self.rcon.get_status()
             if len(player_list) > 0:
-                current_msg = messages[idx]
-                await self.rcon.send_command(f'say ^7{current_msg}')
+                await self.broadcast(f'^7{messages[idx]}')
                 idx = (idx + 1) % len(messages)
+
+    async def next_map_broadcast_task(self):
+        """Periodically announces the next map in rotation."""
+        if not self.config.getboolean('BROADCAST', 'nextmap_enabled', fallback=False): return
+        interval = self.config.getint('BROADCAST', 'nextmap_interval', fallback=300)
+
+        while self.running:
+            await asyncio.sleep(interval)
+            _, player_list = await self.rcon.get_status()
+            if len(player_list) > 0:
+                resp = await self.get_next_map_info()
+                await self.broadcast(f'^7{resp}')
 
     async def run(self):
         logger.info(f"Initializing SneakyBot v{self.version}")
         await self.check_server_config()
-
         loop = asyncio.get_running_loop()
         for s in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(s, lambda: asyncio.create_task(self.shutdown()))
-
         try:
             await asyncio.gather(
                 self.tail_log(),
                 self.discord_update_task(),
-                self.broadcast_task()
+                self.broadcast_task(),
+                self.next_map_broadcast_task()
             )
-        except asyncio.CancelledError:
-            pass
+        except asyncio.CancelledError: pass
 
     async def shutdown(self):
-        logger.info("Shutdown signal received. Cleaning up...")
         self.running = False
         tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
         [task.cancel() for task in tasks]
         await asyncio.gather(*tasks, return_exceptions=True)
-        logger.info("SneakyBot has shut down gracefully.")
         sys.exit(0)
 
 if __name__ == "__main__":
     cfg = load_config()
     bot = SneakyBot(cfg)
-    try:
-        asyncio.run(bot.run())
-    except (KeyboardInterrupt, SystemExit):
-        pass
+    try: asyncio.run(bot.run())
+    except (KeyboardInterrupt, SystemExit): pass
