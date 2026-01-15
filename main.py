@@ -19,7 +19,7 @@ import traceback
 from typing import Dict, List, Tuple, Set
 
 # --- METADATA ---
-__version__ = "3.1.3"
+__version__ = "3.1.4"
 __author__ = "Jeremiah Bess - [SBs]PenguinGeek"
 
 # --- CONFIGURATION MANAGEMENT ---
@@ -399,30 +399,30 @@ class SneakyBot:
             rule_config = self.config.get('RULES', 'rule_list', fallback='1. No Cheating | 2. Respect Others')
             rules = [r.strip() for r in rule_config.split('|')]
             for rule in rules:
-                await self.broadcast(f'^2RULES: ^7{rule}')
+                await self.broadcast(f'^2RULES: ^7{rule}', priority=True)
                 await asyncio.sleep(0.1)
 
         elif msg == '!ping':
-            await self.broadcast('^3Pong!')
+            await self.broadcast('^3Pong!', priority=True)
 
         elif msg == '!sneakybot':
-            await self.broadcast(f'^7SneakyBot v{self.version}: ^3https://github.com/netsecninja/sneakybot')
+            await self.broadcast(f'^7SneakyBot v{self.version}: ^3https://github.com/netsecninja/sneakybot', priority=True)
 
         elif msg == '!nextmap':
             resp = await self.get_next_map_info()
-            await self.broadcast(f'^7{resp}')
+            await self.broadcast(f'^7{resp}', priority=True)
 
         elif msg in ['!forgive', '!forgiveall', '!fp', '!fa']:
-            await self.broadcast("^1Bwahahaha! ^7There's no forgiveness here!")
+            await self.broadcast("^1Bwahahaha! ^7There's no forgiveness here!", priority=True)
 
         elif msg == '!help':
             commands = "!help, !rules, !ping, !sneakybot, !nextmap"
-            await self.broadcast(f'^7Available commands: ^3{commands}')
+            await self.broadcast(f'^7Available commands: ^3{commands}', priority=True)
 
     async def on_connect(self, client_id: str):
         player_name = self.players.get(client_id, f"Client {client_id}")
         if client_id in self.welcomed_players: return
-        await self.broadcast(f'^7Welcome ^3{player_name}^7! - Powered by SneakyBot')
+        await self.broadcast(f'^7Welcome ^3{player_name}^7! - Powered by SneakyBot', priority=True)
         self.welcomed_players.add(client_id)
 
     async def send_discord_webhook(self, message: str):
