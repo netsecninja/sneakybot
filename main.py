@@ -19,7 +19,7 @@ import traceback
 from typing import Dict, List, Tuple, Set, Optional
 
 # --- METADATA ---
-__version__ = "3.1.1"
+__version__ = "3.1.2"
 __author__ = "Jeremiah Bess - [SBs]PenguinGeek"
 
 # --- CONFIGURATION MANAGEMENT ---
@@ -116,29 +116,16 @@ def load_config():
 
     config.read(CONFIG_FILE)
 
-    # Validation for existing configs to prevent silent crashes on missing sections
+    # Validation for existing configs
     sections_added = False
-    if 'RULES' not in config:
-        config['RULES'] = {'rule_list': '1. No Cheating | 2. Respect Others | 3. Have Fun'}
-        sections_added = True
-    if 'BROADCAST' not in config:
-        config['BROADCAST'] = {
-            'enabled': 'true',
-            'interval': '300',
-            'messages': 'Welcome to the server!',
-            'include_nextmap': 'true'
-        }
-        sections_added = True
+    for section in ['RULES', 'BROADCAST', 'DISCORD', 'DISCORD_NOTIFICATIONS']:
+        if section not in config:
+            config[section] = {}
+            sections_added = True
 
     if sections_added:
         with open(CONFIG_FILE, 'w') as f:
             config.write(f)
-        logger.info(f"Updated {CONFIG_FILE} with missing sections.")
-
-    env_webhook = os.getenv('URT_DISCORD_WEBHOOK')
-    if env_webhook:
-        config['DISCORD']['webhook_url'] = env_webhook
-        config['DISCORD']['enabled'] = 'true'
 
     return config
 
@@ -246,9 +233,8 @@ class SneakyBot:
         self.running = True
         self.players: Dict[str, str] = {}
         self.welcomed_players: Set[str] = set()
-        self.last_player_count = 0
+        self.last_player_count = -1 # Start at -1 to trigger initial post if server has people
 
-        # Centralized Message Orchestration
         self.message_queue = asyncio.Queue()
 
     def _get_rcon_from_cfg(self):
@@ -265,78 +251,55 @@ class SneakyBot:
         return None
 
     async def broadcast(self, message: str, priority: bool = False):
-        """Adds a message to the orchestrator queue."""
         if priority:
-            # High priority responses bypass the queue for immediate feedback
             await self.rcon.send_command(f'say {message}')
         else:
             await self.message_queue.put(message)
 
     async def get_next_map_info(self) -> str:
-        """Parses mapcycle.txt to find the next map info based on current map."""
         if not self.mapcycle_path or not os.path.exists(self.mapcycle_path):
             return "Mapcycle file not found."
-
         cvars, _ = await self.rcon.get_status()
         current_map = cvars.get('mapname', '').lower()
         if not current_map: return "Cannot determine current map."
-
         try:
             with open(self.mapcycle_path, 'r') as f:
                 lines = [line.strip() for line in f.readlines() if line.strip()]
-
             next_line = None
             for i, line in enumerate(lines):
                 if line.lower().startswith(current_map):
                     next_line = lines[(i + 1) % len(lines)]
                     break
-
-            if not next_line and lines:
-                next_line = lines[0]
-
+            if not next_line and lines: next_line = lines[0]
             if next_line:
                 map_match = re.match(r'^([^\s{]+)', next_line)
                 if not map_match: return "Could not parse next map name."
-
                 target_map = map_match.group(1)
-
                 gt = re.search(r'g_gametype\s+(\d+)', next_line)
                 insta = re.search(r'g_instagib\s+(\d+)', next_line)
                 grav = re.search(r'g_gravity\s+(\d+)', next_line)
-
                 gametype_str = GAMETYPES.get(gt.group(1) if gt else "0", "Unknown Mode")
                 is_instagib = (insta.group(1) == "1") if insta else False
                 is_lowgrav = (int(grav.group(1)) < 800) if grav else False
-
                 prefix = []
                 if is_lowgrav: prefix.append("Low gravity")
                 if is_instagib: prefix.append("Instagib")
-
                 prefix_str = " ".join(prefix)
-                if prefix_str:
-                    return f"Next map: {prefix_str} {gametype_str} on {target_map}"
-                else:
-                    return f"Next map: {gametype_str} on {target_map}"
-
+                return f"Next map: {prefix_str + ' ' if prefix_str else ''}{gametype_str} on {target_map}"
         except Exception as e:
             logger.error(f"Error parsing mapcycle: {e}")
             return "Error reading map rotation."
-
         return "Map cycle empty or current map not found."
 
     async def check_server_config(self):
         required_vars = {"g_logsync": "1", "g_loghits": "1"}
         if not self.server_cfg or not os.path.exists(self.server_cfg):
-            logger.warning(f"server.cfg not found at {self.server_cfg}. RCON commands will be disabled.")
+            logger.warning(f"server.cfg not found. RCON functionality limited.")
             return
-
         extracted_pw = self._get_rcon_from_cfg()
         if extracted_pw:
             self.rcon.password = extracted_pw
             logger.info("Successfully extracted RCON password from server.cfg")
-        else:
-            logger.error("RCON password NOT found in server.cfg. RCON functionality is disabled.")
-
         try:
             with open(self.server_cfg, 'r') as f: lines = f.readlines()
             modified = False
@@ -362,24 +325,17 @@ class SneakyBot:
         except Exception as e: logger.error(f"Config check failed: {e}")
 
     async def tail_log(self):
-        if not os.path.exists(self.log_path):
-            logger.error(f"Log file not found at {self.log_path}")
-            return
-
+        if not os.path.exists(self.log_path): return
         with open(self.log_path, 'r', encoding='utf-8', errors='replace') as f:
             f.seek(0, os.SEEK_END)
             last_pos = f.tell()
-
             while self.running:
                 line = f.readline()
                 if not line:
-                    if os.path.getsize(self.log_path) < last_pos:
-                        f.seek(0)
-                    else:
-                        await asyncio.sleep(0.5)
+                    if os.path.getsize(self.log_path) < last_pos: f.seek(0)
+                    else: await asyncio.sleep(0.5)
                     last_pos = f.tell()
                     continue
-
                 await self.parse_line(line.strip())
 
     async def parse_line(self, line: str):
@@ -401,26 +357,21 @@ class SneakyBot:
 
     async def on_chat(self, name: str, message: str):
         msg = message.strip().lower()
-
         if msg == '!rules':
             rule_config = self.config.get('RULES', 'rule_list', fallback='1. No Cheating | 2. Respect Others')
             rules = [r.strip() for r in rule_config.split('|')]
             for rule in rules:
                 await self.broadcast(f'^2RULES: ^7{rule}', priority=True)
-                # Small intra-message delay for readability
                 await asyncio.sleep(0.2)
-        elif msg == '!ping':
-            await self.broadcast('^3Pong!', priority=True)
-        elif msg == '!sneakybot':
-            await self.broadcast(f'^7SneakyBot v{self.version}: ^3https://github.com/netsecninja/sneakybot', priority=True)
+        elif msg == '!ping': await self.broadcast('^3Pong!', priority=True)
+        elif msg == '!sneakybot': await self.broadcast(f'^7SneakyBot v{self.version}: ^3https://github.com/netsecninja/sneakybot', priority=True)
         elif msg == '!nextmap':
             resp = await self.get_next_map_info()
             await self.broadcast(f'^7{resp}', priority=True)
         elif msg in ['!forgive', '!forgiveall', '!fp', '!fa']:
             await self.broadcast("^1Bwahahaha! ^7There's no forgiveness here!", priority=True)
         elif msg == '!help':
-            commands = "!help, !rules, !ping, !sneakybot, !nextmap"
-            await self.broadcast(f'^7Available commands: ^3{commands}', priority=True)
+            await self.broadcast('^7Available commands: ^3!help, !rules, !ping, !sneakybot, !nextmap', priority=True)
 
     async def on_connect(self, client_id: str):
         player_name = self.players.get(client_id, f"Client {client_id}")
@@ -429,67 +380,87 @@ class SneakyBot:
         self.welcomed_players.add(client_id)
 
     async def orchestrator_task(self):
-        """Processes the message queue with a staggered delay to prevent flood kicks/spam."""
         logger.info("Message Orchestrator started.")
         while self.running:
             try:
                 message = await self.message_queue.get()
-                # Fast check for players before sending
                 _, player_list = await self.rcon.get_status()
                 if len(player_list) > 0:
                     await self.rcon.send_command(f'say {message}')
-                    # Stagger automated messages by 2 seconds to avoid clogging the screen
                     await asyncio.sleep(2)
                 self.message_queue.task_done()
-            except asyncio.CancelledError:
-                break
+            except asyncio.CancelledError: break
             except Exception as e:
                 logger.error(f"Error in orchestrator: {e}")
                 await asyncio.sleep(1)
 
+    async def send_discord_webhook(self, content: str):
+        url = self.config.get('DISCORD', 'webhook_url', fallback='')
+        if not url: return
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json={"content": content}) as resp:
+                    if resp.status not in [200, 204]:
+                        logger.error(f"Discord Webhook failed with status {resp.status}")
+        except Exception as e:
+            logger.error(f"Discord Webhook error: {e}")
+
     async def discord_update_task(self):
         if not self.config.getboolean('DISCORD', 'enabled', fallback=False): return
         interval = self.config.getint('DISCORD', 'update_interval', fallback=60)
+        logger.info("Discord Update Task started.")
+
         while self.running:
             try:
                 cvars, player_list = await self.rcon.get_status()
                 count = len(player_list)
+                max_players = int(cvars.get('sv_maxclients', '20'))
+
                 if count != self.last_player_count:
-                    # Logic for webhooks...
-                    pass
-                self.last_player_count = count
+                    msg = ""
+                    notifs = self.config['DISCORD_NOTIFICATIONS']
+
+                    if count == 0:
+                        msg = notifs.get('empty_server', "Server is empty.")
+                    elif count == 1:
+                        msg = notifs.get('single_player', "A player is online.")
+                    elif count == max_players:
+                        msg = notifs.get('full_server', "{count} players. Full!").format(count=count, max=max_players)
+                    elif count == max_players - 1:
+                        msg = notifs.get('almost_full', "{count} players. One slot left!").format(count=count, max=max_players)
+                    else:
+                        imb_msgs = notifs.get('imbalance_messages', "{count} players online.").split('|')
+                        msg = random.choice(imb_msgs).format(count=count, max=max_players)
+
+                    if msg:
+                        await self.send_discord_webhook(msg)
+                    self.last_player_count = count
+
                 await asyncio.sleep(interval)
-            except asyncio.CancelledError:
-                break
+            except asyncio.CancelledError: break
+            except Exception as e:
+                logger.error(f"Error in Discord task: {e}")
+                await asyncio.sleep(10)
 
     async def automated_broadcast_timer(self):
-        """Timer for general periodic messages and optional nextmap announcements."""
         if not self.config.getboolean('BROADCAST', 'enabled', fallback=False): return
         interval = self.config.getint('BROADCAST', 'interval', fallback=300)
         messages_raw = self.config.get('BROADCAST', 'messages', fallback='')
         include_nextmap = self.config.getboolean('BROADCAST', 'include_nextmap', fallback=True)
-
         messages = [m.strip() for m in messages_raw.split('|') if m.strip()]
         if not messages and not include_nextmap: return
-
         idx = 0
         while self.running:
             try:
                 await asyncio.sleep(interval)
-
-                # Logic: Cycle through configured messages.
-                # If include_nextmap is true, every alternate message is a nextmap update.
                 if include_nextmap and (idx % 2 != 0 or not messages):
                     resp = await self.get_next_map_info()
                     await self.broadcast(f'^7{resp}')
                 elif messages:
-                    # Adjust index to point to correct message list item
                     msg_idx = (idx // 2) % len(messages) if include_nextmap else idx % len(messages)
                     await self.broadcast(f'^7{messages[msg_idx]}')
-
                 idx += 1
-            except asyncio.CancelledError:
-                break
+            except asyncio.CancelledError: break
 
     async def run(self):
         logger.info(f"Starting SneakyBot v{self.version}")
@@ -498,32 +469,21 @@ class SneakyBot:
             loop = asyncio.get_running_loop()
             for s in (signal.SIGINT, signal.SIGTERM):
                 loop.add_signal_handler(s, lambda: asyncio.create_task(self.shutdown()))
-
-            # Start all tasks
             await asyncio.gather(
                 self.tail_log(),
                 self.orchestrator_task(),
                 self.discord_update_task(),
                 self.automated_broadcast_timer()
             )
-        except asyncio.CancelledError:
-            # Expected during shutdown
-            pass
-        except Exception as e:
-            logger.error(f"Critical error in bot loop: {e}")
-            logger.debug(traceback.format_exc())
-        finally:
-            await self.shutdown()
+        except asyncio.CancelledError: pass
+        finally: await self.shutdown()
 
     async def shutdown(self):
         if not self.running: return
         self.running = False
         logger.info("Shutting down SneakyBot...")
         tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-        for task in tasks:
-            task.cancel()
-
-        # Give tasks a moment to wrap up
+        for task in tasks: task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         sys.exit(0)
 
@@ -532,8 +492,7 @@ if __name__ == "__main__":
         cfg = load_config()
         bot = SneakyBot(cfg)
         asyncio.run(bot.run())
-    except (KeyboardInterrupt, SystemExit):
-        pass
+    except (KeyboardInterrupt, SystemExit): pass
     except Exception as e:
-        logger.critical(f"Bot failed to start: {e}")
+        logger.critical(f"Bot failed: {e}")
         logger.debug(traceback.format_exc())
