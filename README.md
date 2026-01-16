@@ -17,7 +17,7 @@ SneakyBot is a lightweight, asynchronous Python bot designed for monitoring Urba
 ## Installation
 1. Clone the repository:
     ```
-    git clone [https://github.com/netsecninja/sneakybot.git](https://github.com/netsecninja/sneakybot.git)
+    git clone https://github.com/netsecninja/sneakybot.git
     cd sneakybot
     ```
 2. Install dependencies:
