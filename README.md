@@ -31,20 +31,17 @@ SneakyBot is a lightweight, asynchronous Python bot designed for monitoring Urba
 4. Edit `sneakybot.cfg` with your server paths and Discord webhook.
 
 ## Configuration Highlights
-### Paths
+### PATHS
 Ensure `q3ut4_path` point to the correct directory on your server.
 
-### Rules
+### RULES
 Define your game server rules you want to share with players.
 
-### Broadcasts
+### BROADCAST
 You can configure periodic in-game broadcasts. Additionally, you can announce the next map in the cycle.
 
-### Discord
-If you create a webhook for your Discord server, you can enable player count and map messages. These messages can be customized.
-
-### Discord Notifications
-You can customize the messages sent to Discord. Use `{count}` for the current player number and `{max}` for the server capacity.
+### DISCORD
+If you create a webhook for your Discord server, you can enable player count and map messages. You can customize the messages sent to Discord. Use `{count}` for the current player number and `{max}` for the server capacity.
 
 ## Requirements
 - Python 3.9+
